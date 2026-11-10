@@ -121,11 +121,13 @@ claude "/wayfinder <map> <ticket>  Context from the session that launched this o
 ## Trackers
 
 - **Local markdown:** `.scratch/<effort>/map.md`, with tickets in `tickets/` or `issues/`. Two ticket formats work: YAML frontmatter (`title`, `type`, `status`, `assignee`, `blocked_by`), or the skill doc's plain lines (`# Title`, `Type:`, `Status:`, `Blocked by:`).
-- **GitHub:** open issues labelled `wayfinder:map` in the working directory's repository, read with `gh`. Tickets are the map's sub-issues (or a task list in its body), typed by `wayfinder:<type>` labels, and blocked by GitHub's native issue dependencies (or a `Blocked by: #n` line).
+- **GitHub:** open issues labelled `wayfinder:map` in the working directory's repository, read with `gh`. Tickets are the map's sub-issues (or a task list in its body when it has none), typed by `wayfinder:<type>` labels, and blocked by GitHub's native issue dependencies (or a `Blocked by: #n` line when a ticket has none).
 
 Task tickets count as AFK unless the file has `hitl: true` or the issue has a `wayfinder:hitl` label.
 
 Every Claude Code tab runs its own copy of the mod against the same tracker. A tab's own edits show at once. Other tabs' edits show within a few seconds, because the mod checks file modification times. GitHub maps refresh every 45 seconds.
+
+A GitHub map costs two GraphQL requests a refresh (one more per 100 tickets), whatever the number of tickets, and the tabs open on one repository share each read, so more tabs do not mean more requests. When GitHub cannot be read, the pane keeps the tickets it had, shows the error under the map's title, and waits twice as long before each new try, up to 15 minutes. `r` reads again at once.
 
 ## Settings
 
@@ -136,7 +138,7 @@ Change these in `/plugin` → wayfinder-sidebar → configure, or under `pluginC
 | `launcher` | `iterm` | `iterm` (new iTerm tab), `terminal` (new Terminal.app window) or `copy` (copy the command). Other systems always copy. |
 | `editor` | system opener | Command that opens a ticket file, such as `code`, `cursor` or `zed` |
 | `pollSeconds` | `3` | How often local files are checked |
-| `githubSeconds` | `45` | How often GitHub maps are re-read |
+| `githubSeconds` | `45` | How often GitHub maps are re-read, across all tabs. At least 10; a lower value counts as 45. |
 | `contextBudget` | `200000` | Tokens per session where the context bar fills and turns red |
 
 The first launch into iTerm or Terminal makes macOS ask whether Claude Code may control that app.

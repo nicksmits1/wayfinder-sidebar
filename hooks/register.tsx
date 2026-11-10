@@ -7,7 +7,9 @@ import {
   budgetLevel,
   fit,
   fmtTokens,
-  ghTicket,
+  gqlTicket,
+  issuesByNumber,
+  issuesQuery,
   localId,
   newlyReady,
   nextUnblocked,
@@ -16,9 +18,11 @@ import {
   parseMapBody,
   plainText,
   statusOf,
+  subIssuesPage,
+  SUB_ISSUES_QUERY,
   taskListNumbers,
   wrapLines,
-  type GhIssue,
+  type GqlIssue,
   type Status,
 } from './tracker'
 import { effectiveLauncher, handoffFile, handoffPrompt, launchArgv, mapRef, openArgv, sessionPrompt, sessionTicket, shellCommand, ticketRef, type Launcher } from './launch'
@@ -28,6 +32,7 @@ const PANE = 'wayfinder'
 const TICK_MS = 150
 const LAUNCH_TTL_MS = 10 * 60 * 1000
 const FLASH_MS = 1600
+const GH_BACKOFF_MAX_MS = 15 * 60 * 1000
 const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 
 // Change a shape tag when that value's fields change: it declines what an earlier version stored.
@@ -86,7 +91,8 @@ let tmp = '/tmp'
 let platform = '' // `uname -s`: Darwin, Linux, …
 let skillText: string | undefined
 let ghRepo: string | null | undefined // undefined: not checked yet; null: none
-let lastGh = 0
+let ghAt = 0 // when the GitHub maps shown were last asked for, by this tab or another
+let ghFails = 0 // failed reads in a row; each one doubles the wait before the next
 let ghMaps: WfMap[] = []
 let busy = false
 let pendingWork: string | undefined // `/wayfinder` arguments waiting for the maps to load
@@ -136,38 +142,92 @@ async function gh($: Dollar, args: string[]): Promise<unknown> {
   return JSON.parse(r.stdout)
 }
 
-async function loadGithub($: Dollar): Promise<WfMap[]> {
+/** One GraphQL request. `partial` accepts an answer that came with errors, such as a number that names no issue. */
+async function ghQuery($: Dollar, repo: string, query: string, vars: Record<string, string | number> = {}, partial = false): Promise<unknown> {
+  const [owner = '', name = ''] = repo.split('/')
+  const args = ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`]
+  for (const [k, v] of Object.entries(vars)) args.push(typeof v === 'number' ? '-F' : '-f', `${k}=${v}`)
+  const r = await $.process.run(['gh', ...args], { cwd: root, timeoutMs: 20000 })
+  let data: unknown
+  try { data = (JSON.parse(r.stdout) as { data?: unknown }).data } catch { /* no answer */ }
+  if (data == null || (r.exitCode !== 0 && !partial)) throw new Error(r.stderr.trim() || 'gh api graphql failed')
+  return data
+}
+
+/** A map's tickets: its sub-issues, else the task list in its body. */
+async function loadChildren($: Dollar, repo: string, number: number, body: string): Promise<GqlIssue[]> {
+  let children: GqlIssue[] = []
+  let failed: unknown
+  try {
+    let after: string | undefined
+    for (let page = 0; page < 10; page++) {
+      const r = subIssuesPage(await ghQuery($, repo, SUB_ISSUES_QUERY, after ? { number, after } : { number }))
+      children.push(...r.issues)
+      if (!(after = r.next)) break
+    }
+  } catch (err) { children = []; failed = err }
+  if (children.length) return children
+  const listed = taskListNumbers(body)
+  if (!listed.length) {
+    if (failed) throw failed
+    return []
+  }
+  // A GitHub that could not answer for sub-issues is not asked for native blockers either.
+  return issuesByNumber(await ghQuery($, repo, issuesQuery(listed, !failed), {}, true), listed)
+}
+
+/** The repository's open maps. A map that could not be read keeps the tickets it had in `prev`, with the error. */
+async function loadGithub($: Dollar, prev: readonly WfMap[]): Promise<WfMap[]> {
+  if (!ghRepo) return []
+  const repo = ghRepo
+  const mapIssues = (await gh($, ['issue', 'list', '--repo', repo, '--label', 'wayfinder:map', '--state', 'open', '--json', 'number,title,url,body', '--limit', '20'])) as { number: number; title: string; url: string; body: string }[]
+  const out: WfMap[] = []
+  for (const mi of mapIssues) {
+    const key = `github:${repo}#${mi.number}`
+    const map = { key, tracker: 'github' as const, url: mi.url, repo, number: mi.number, ...parseMapBody(`# ${mi.title}\n${mi.body ?? ''}`, mi.title) }
+    try { out.push({ ...map, tickets: (await loadChildren($, repo, mi.number, mi.body ?? '')).map(gqlTicket) }) }
+    catch (err) { out.push({ ...map, tickets: prev.find(m => m.key === key)?.tickets ?? [], error: errorText(err) }) }
+  }
+  return out
+}
+
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err)).replace(/^gh:\s*/, '')
+
+/** What the tabs share under `github:<owner>/<repo>`: the last read of that repository's maps, by whichever tab made it. */
+type GhShared = { at: number; maps: WfMap[]; fails?: number }
+
+const readShared = (v: unknown): GhShared | undefined => {
+  const r = v as Partial<GhShared> | null | undefined
+  return r && typeof r.at === 'number' && Array.isArray(r.maps) ? { at: r.at, maps: r.maps, fails: r.fails } : undefined
+}
+
+/**
+ * Keeps `ghMaps` current. The tabs of one repository share a read through the store, so GitHub is
+ * asked once per `githubSeconds` however many tabs are open, and a failed read doubles the wait.
+ */
+async function refreshGithub($: Dollar, now: number, force: boolean) {
   if (ghRepo === undefined) {
     try {
       const r = await $.process.run(['gh', 'repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: root, timeoutMs: 15000 })
       ghRepo = r.exitCode === 0 && r.stdout.trim() ? r.stdout.trim() : null
     } catch { ghRepo = null }
   }
-  if (!ghRepo) return []
-  const repo = ghRepo
-  const mapIssues = (await gh($, ['issue', 'list', '--repo', repo, '--label', 'wayfinder:map', '--state', 'open', '--json', 'number,title,url,body', '--limit', '20'])) as { number: number; title: string; url: string; body: string }[]
-  const out: WfMap[] = []
-  for (const mi of mapIssues) {
-    const header = parseMapBody(`# ${mi.title}\n${mi.body ?? ''}`, mi.title)
-    let children: GhIssue[]
-    try { children = (await gh($, ['api', `repos/${repo}/issues/${mi.number}/sub_issues?per_page=100`])) as GhIssue[] }
-    catch {
-      children = []
-      for (const n of taskListNumbers(mi.body ?? '')) {
-        try { children.push((await gh($, ['api', `repos/${repo}/issues/${n}`])) as GhIssue) } catch { /* skip */ }
-      }
-    }
-    const tickets = await Promise.all(children.map(async c => {
-      let native: number[] | undefined
-      if (c.state.toLowerCase() !== 'closed') {
-        try { native = ((await gh($, ['api', `repos/${repo}/issues/${c.number}/dependencies/blocked_by`])) as { number: number }[]).map(x => x.number) }
-        catch { native = undefined }
-      }
-      return ghTicket(c, native)
-    }))
-    out.push({ key: `github:${repo}#${mi.number}`, tracker: 'github', url: mi.url, repo, number: mi.number, ...header, tickets })
-  }
-  return out
+  if (!ghRepo) return
+  const storeKey = `github:${ghRepo}`
+  const shared = readShared(await $.store.get(storeKey).catch(() => undefined))
+  if (shared && shared.at > ghAt) { ghAt = shared.at; ghFails = shared.fails ?? 0; ghMaps = shared.maps }
+  const wait = Math.min(opts.githubSeconds * 1000 * 2 ** ghFails, Math.max(GH_BACKOFF_MAX_MS, opts.githubSeconds * 1000))
+  if (!force && now - ghAt <= wait) return
+  // Stamp the store first, so the other tabs wait for this read instead of starting their own.
+  ghAt = now
+  await $.store.set(storeKey, { at: now, maps: ghMaps, fails: ghFails } satisfies GhShared).catch(() => undefined)
+  let failed: boolean
+  try { ghMaps = await loadGithub($, ghMaps); failed = ghMaps.some(m => m.error) }
+  catch (err) { ghMaps = ghMaps.map(m => ({ ...m, error: errorText(err) })); failed = true }
+  ghFails = failed ? ghFails + 1 : 0
+  // A later stamp than the one above, so the tabs that saw that one take this read too.
+  ghAt = Math.max(await $.clock.now(), now + 1)
+  await $.store.set(storeKey, { at: ghAt, maps: ghMaps, fails: ghFails } satisfies GhShared).catch(() => undefined)
 }
 
 async function refresh($: Dollar, opt: { github?: boolean } = {}) {
@@ -176,10 +236,7 @@ async function refresh($: Dollar, opt: { github?: boolean } = {}) {
   try {
     const now = await $.clock.now()
     const local = await loadLocal($)
-    if (opt.github || now - lastGh > opts.githubSeconds * 1000) {
-      lastGh = now
-      try { ghMaps = await loadGithub($) } catch (err) { ghMaps = ghMaps.map(m => ({ ...m, error: String(err) })) }
-    }
+    await refreshGithub($, now, opt.github === true)
     const next = [...local, ...ghMaps]
     const prev = await read($, mapsA)
     // Tickets a resolution just unblocked flash once.
@@ -936,7 +993,7 @@ export const register: Register = (on, options) => {
         ))}
         {m.error ? <Text color={YELLOW} wrap="wrap">{`! ${m.error}`}</Text> : null}
         <Text dimColor>{sep}</Text>
-        {open.length === 0 ? <Text color={GREEN}>Every ticket is resolved. The way is clear.</Text> : null}
+        {open.length === 0 && !(m.error && m.tickets.length === 0) ? <Text color={GREEN}>Every ticket is resolved. The way is clear.</Text> : null}
         {body as never}
         {contextSection()}
         {m.fog.length ? <Text dimColor>{`≋ fog: ${fit(m.fog[0] ?? '', W - 8).trimEnd()}${m.fog.length > 1 ? ` +${m.fog.length - 1}` : ''}`}</Text> : null}
