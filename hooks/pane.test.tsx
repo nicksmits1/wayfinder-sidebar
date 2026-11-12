@@ -8,12 +8,23 @@ const FILES: Record<string, string> = {
   '/repo/.scratch/wayfinder/tickets/06-p1-p2.md': '---\ntitle: P1 & P2 rules\ntype: wayfinder:grilling\nstatus: open\nassignee: claude\nblocked_by: [01-identity.md]\n---\n',
   '/repo/.scratch/wayfinder/tickets/07-p3.md': '---\ntitle: P3 user-confirmed payment actions\ntype: wayfinder:grilling\nstatus: open\nassignee:\nblocked_by: [01-identity.md]\n---\n',
   '/repo/.scratch/wayfinder/tickets/13-checks.md': '---\ntitle: Implement P1/P2 policy checks\ntype: wayfinder:task\nstatus: open\nassignee:\nblocked_by: [06-p1-p2.md, 07-p3.md]\n---\n',
+  // A plain plan: numbered checklists, no map.md, no Type or Status lines.
+  '/repo/.scratch/m3/01-dry-run.md': '# Rehearse on rtest\n\n**When:** Wed · **Owner:** Nick\n\n- [ ] dry run\n',
+  '/repo/.scratch/m3/02-merge.md': '# Merge and pull\n\n**When:** Thu · **Owner:** Nick · **Depends on:** 01\n\n- [ ] merge\n',
+  '/repo/.scratch/m3/03-old.md': '# Already done\n\n- [x] all of it\n',
+  // Not plans: agent notes, and a folder with a single numbered file.
+  '/repo/.scratch/ci-report/AGENTS.md': '# notes\n',
+  '/repo/.scratch/lonely/01-only.md': '# Only one\n',
 }
 const DIRS: Record<string, string[]> = {
-  '/repo/.scratch': ['wayfinder'],
+  '/repo/.scratch': ['wayfinder', 'm3', 'ci-report', 'lonely'],
   '/repo/.scratch/wayfinder/tickets': ['01-identity.md', '06-p1-p2.md', '07-p3.md', '13-checks.md'],
+  '/repo/.scratch/m3': ['01-dry-run.md', '02-merge.md', '03-old.md'],
+  '/repo/.scratch/ci-report': ['AGENTS.md'],
+  '/repo/.scratch/lonely': ['01-only.md'],
 }
-const isDir = (p: string) => p in DIRS || p === '/repo/.scratch/wayfinder'
+const DIR_PATHS = new Set(['/repo/.scratch/wayfinder', '/repo/.scratch/m3', '/repo/.scratch/ci-report', '/repo/.scratch/lonely'])
+const isDir = (p: string) => (p in DIRS && !p.endsWith('.md')) || DIR_PATHS.has(p)
 
 const PANE = {
   plugin: 'wayfinder-sidebar',
@@ -123,15 +134,21 @@ function tab(on: Parameters<Parameters<typeof test>[1]>[1], sid: string, shared:
   }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 10, mtimeMs: 1, isLink: false } }))
   on('fs.read', (_, e) => (e.path in FILES ? { value: FILES[e.path]! } : { deny: 'missing' }))
-  on('process.run', (_, e) => (e.argv[0] === 'uname'
-    ? { value: { exitCode: 0, stdout: 'Darwin\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-    : { value: { exitCode: 1, stdout: '', stderr: 'no gh here', isStdoutTruncated: false, isStderrTruncated: false } }))
-  on('prompt.submit', (_, e) => ({ text: e.text }))
+  const argvs: string[][] = []
+  on('process.run', (_, e) => {
+    if (e.argv[0] === 'uname') return { value: { exitCode: 0, stdout: 'Darwin\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    argvs.push(e.argv)
+    return e.argv[0] === 'osascript'
+      ? { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      : { value: { exitCode: 1, stdout: '', stderr: 'no gh here', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const prompts: string[] = []
+  on('prompt.submit', (_, e) => { prompts.push(e.text); return { text: e.text } })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   const toasts: string[] = []
   on('ui.toast', (_, e) => { toasts.push(JSON.stringify(e)); return { value: {} } })
 
-  return { clock, toasts }
+  return { clock, toasts, argvs, prompts }
 }
 
 test('a session started with /wayfinder <map> <ticket> holds that ticket from its first turn', async ($, on) => {
@@ -178,4 +195,82 @@ test('"this tab" starts the ticket in this session, which then holds it', async 
   expect(await ui.find({ type: 'Text', text: /Start 07/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /you$/ })).toBeDefined()
   await ui.unmount()
+})
+
+const PLAN_KEY = '/repo/.scratch/m3'
+const PLAN_PROMPT_01 = 'Work on the ticket .scratch/m3/01-dry-run.md from the plan in .scratch/m3/.'
+
+test('a plain plan folder shows up beside the map, and ▶ starts its ticket with the plan prompt', async ($, on) => {
+  const { clock, argvs } = tab(on, 'sess-abc', {})
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await clock.advance(10)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // Two tabs: the wayfinder map and the plan. ci-report and lonely are not plans.
+  expect(await ui.find({ type: 'Button', key: `map:${PLAN_KEY}` })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'map:/repo/.scratch/ci-report' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'map:/repo/.scratch/lonely' })).toBeUndefined()
+
+  await ui.press({ key: `map:${PLAN_KEY}` })
+  expect(await ui.find({ type: 'Text', text: /plain plan in \.scratch\/m3/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Rehearse on rtest/ })).toBeDefined()
+  // 01 ready, 02 waits on 01, 03 closed by its ticked boxes.
+  for (const n of [/^1 ▸$/, /^ *0 ◐$/, /^ *1 ⧗$/, /^ *✓ 1$/]) expect(await ui.find({ type: 'Text', text: n })).toBeDefined()
+
+  await ui.press({ key: 'run:01' })
+  await ui.press({ key: 'fresh' })
+  await clock.advance(10)
+  const osa = argvs.find(a => a[0] === 'osascript')?.join(' ') ?? ''
+  expect(osa).toContain(PLAN_PROMPT_01)
+  expect(osa).not.toContain('/wayfinder')
+  await ui.unmount()
+})
+
+test('"this tab" on a plan ticket sends the plan prompt here and holds the ticket', async ($, on) => {
+  const { clock, prompts } = tab(on, 'sess-abc', {})
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await clock.advance(10)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: `map:${PLAN_KEY}` })
+  await ui.press({ key: 'run:01' })
+  await ui.press({ key: 'here' })
+  await clock.advance(10)
+  expect(prompts.some(p => p.startsWith(PLAN_PROMPT_01))).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /you$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a session started with the plan prompt holds that plan ticket from its first turn', async ($, on) => {
+  const { clock, toasts } = tab(on, 'sess-new', {})
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: `${PLAN_PROMPT_01} Read the other tickets in that folder for context, then do this one and tick its checklist as you go.` })
+  await clock.advance(10)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: `map:${PLAN_KEY}` })
+  expect(await ui.find({ type: 'Text', text: /you$/ })).toBeDefined()
+  await ui.press({ key: 'run:01' })
+  expect(toasts.join()).toContain('01 is not ready to start')
+  await ui.unmount()
+})
+
+test('opens on the first map with open tickets, not a finished one', async ($, on) => {
+  FILES['/repo/.scratch/aa-done/map.md'] = '# Map: Finished\n\n## Destination\n\nAll done.\n'
+  FILES['/repo/.scratch/aa-done/issues/01-x.md'] = '# X\n\nType: wayfinder:task\nStatus: closed\n'
+  DIRS['/repo/.scratch'] = ['aa-done', ...DIRS['/repo/.scratch']!]
+  DIRS['/repo/.scratch/aa-done/issues'] = ['01-x.md']
+  DIR_PATHS.add('/repo/.scratch/aa-done')
+  try {
+    const { clock } = tab(on, 'sess-abc', {})
+    await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+    await clock.advance(10)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /I4 submitted on Canvas/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /All done/ })).toBeUndefined()
+    await ui.unmount()
+  } finally {
+    delete FILES['/repo/.scratch/aa-done/map.md']
+    delete FILES['/repo/.scratch/aa-done/issues/01-x.md']
+    DIRS['/repo/.scratch'] = DIRS['/repo/.scratch']!.filter(d => d !== 'aa-done')
+    delete DIRS['/repo/.scratch/aa-done/issues']
+    DIR_PATHS.delete('/repo/.scratch/aa-done')
+  }
 })

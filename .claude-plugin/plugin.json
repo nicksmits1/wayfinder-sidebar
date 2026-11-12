@@ -1,7 +1,7 @@
 {
   "name": "wayfinder-sidebar",
   "version": "0.1.0",
-  "description": "A sidebar of your wayfinder map's tickets: ready, claimed and blocked, with buttons to open a ticket or start a session on it (optionally with a handoff from this session).",
+  "description": "A sidebar of your wayfinder map's tickets, or a plain plan's numbered tickets: ready, claimed and blocked, with buttons to open a ticket or start a session on it (optionally with a handoff from this session).",
   "author": {
     "name": "Nick Smits",
     "url": "https://github.com/nicksmits1"
@@ -51,6 +51,18 @@
       "title": "Context budget per session (tokens)",
       "description": "Where each session's context bar fills up and turns red. One ticket per session, under 200k tokens, is the wayfinder rule of thumb.",
       "default": 200000
+    },
+    "planPrompt": {
+      "type": "string",
+      "title": "Prompt for plain plan tickets",
+      "description": "What a new session is asked to do when you start a ticket from a plain plan (a .scratch folder of numbered tickets with no map.md). {ticket} is the ticket file and {plan} its folder, both relative to the project root. Must contain {ticket}.",
+      "default": "Work on the ticket {ticket} from the plan in {plan}/. Read the other tickets in that folder for context, then do this one and tick its checklist as you go."
+    },
+    "ignoreDirs": {
+      "type": "string",
+      "title": "Folders to ignore",
+      "description": "Comma-separated .scratch folder names never shown as maps or plans, for example ci-report, drafts.",
+      "default": ""
     }
   }
 }

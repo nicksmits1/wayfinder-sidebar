@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
-import { budgetBar, budgetLevel, fmtTokens, localId, newlyReady, nextUnblocked, plainText, wrapLines, parseLocalTicket, parseMapBody, statusOf } from './tracker'
-import { effectiveLauncher, handoffFile, handoffRules, launchArgv, openArgv, sessionPrompt, sessionTicket, shellCommand } from './launch'
+import { budgetBar, budgetLevel, fmtTokens, isPlanFile, localId, newlyReady, nextUnblocked, plainText, wrapLines, parseLocalTicket, parseMapBody, statusOf } from './tracker'
+import { DEFAULT_PLAN_PROMPT, effectiveLauncher, handoffFile, handoffRules, launchArgv, openArgv, planTicket, sessionPrompt, sessionTicket, shellCommand } from './launch'
 import type { WfMap } from '../types'
 
 const FRONT = `---
@@ -152,4 +152,80 @@ test('a /wayfinder prompt names the ticket its session works on, and nothing els
   expect(sessionTicket('.scratch/w/map.md 99', [m])).toBeUndefined() // no such ticket
   expect(sessionTicket('.scratch/other/map.md 07', [m])).toBeUndefined() // another map
   expect(sessionTicket('what does 07 need?', [m])).toBeUndefined()
+})
+
+// ---------- plain plans and looser ticket headers ----------
+
+// Shaped like a real plan folder: numbered checklists with inline bold fields, no Type or Status.
+const PLAN_TICKET = `# Update #1 on prod + install cron
+
+**When:** Thu 11-12, after the merge and pull · **Owner:** Nick · **Depends on:** 02
+
+- [ ] Policy confirmed
+- [x] Pick warm prod verify ids
+`
+
+test('a plain plan ticket: inline bold fields, Depends on, Owner is not a claim', async () => {
+  const t = parseLocalTicket('03-update-1-and-cron.md', PLAN_TICKET, '/p/03.md', { plan: true })
+  expect(t.id).toBe('03')
+  expect(t.title).toBe('Update #1 on prod + install cron')
+  expect(t.type).toBe('task')
+  expect(t.warning).toBeUndefined()
+  expect(t.closed).toBe(false)
+  expect(t.assignee).toBe('')
+  expect(t.blockedBy).toEqual(['02'])
+  const two = parseLocalTicket('08-x.md', PLAN_TICKET.replace('**Depends on:** 02', '**Depends on:** 03, 07'), '/p/08.md', { plan: true })
+  expect(two.blockedBy).toEqual(['03', '07'])
+})
+
+test('a ticket with no Status line closes when every checkbox is ticked', async () => {
+  const done = PLAN_TICKET.replace('- [ ] Policy', '- [x] Policy')
+  expect(parseLocalTicket('03-x.md', done, '/p', { plan: true }).closed).toBe(true)
+  expect(parseLocalTicket('03-x.md', '# No boxes\n\nJust prose.\n', '/p', { plan: true }).closed).toBe(false)
+  // An explicit Status wins over the boxes.
+  expect(parseLocalTicket('03-x.md', `${done}\nStatus: open\n`, '/p', { plan: true }).closed).toBe(false)
+})
+
+test('the Assignee line is the claim; none and friends are not', async () => {
+  const head = (a: string) => `# X\n\nType: wayfinder:grilling\nStatus: open\nAssignee: ${a}\nBlocked by: none\n`
+  expect(parseLocalTicket('12-x.md', head('nicksmits1'), '/x').assignee).toBe('nicksmits1')
+  for (const a of ['none', 'None', '-', 'unassigned', 'nobody']) expect(parseLocalTicket('12-x.md', head(a), '/x').assignee).toBe('')
+  const t = parseLocalTicket('12-x.md', head('nicksmits1'), '/x')
+  expect(statusOf(t, [t], new Set())).toBe('claimed')
+  // A closed ticket keeps no claim.
+  expect(parseLocalTicket('12-x.md', head('nicksmits1').replace('open', 'closed'), '/x').assignee).toBe('')
+})
+
+test('Blocked by: none with a note is no blocker', async () => {
+  const t = parseLocalTicket('10-x.md', '# X\n\nType: wayfinder:grilling\nStatus: open\nBlocked by: none (08 and 09 closed)\n', '/x')
+  expect(t.blockedBy).toEqual([])
+})
+
+test('wayfinder tickets without a type still warn; plan tickets default to task', async () => {
+  expect(parseLocalTicket('01-x.md', '# X\n\nStatus: open\n', '/x').warning).toBe('no ticket type found')
+  expect(parseLocalTicket('01-x.md', '# X\n\nType: wayfinder:task (HITL)\n', '/x', { plan: true }).hitl).toBe(true)
+})
+
+test('plan files are numbered markdown files', async () => {
+  for (const f of ['01-rtest-dry-run.md', '3_x.md', '12-a.md']) expect(isPlanFile(f)).toBe(true)
+  for (const f of ['AGENTS.md', 'README.md', 'map.md', '01-x.txt', 'notes.md']) expect(isPlanFile(f)).toBe(false)
+})
+
+test('a plan ticket starts with the plan prompt, and that prompt names the ticket it works on', async () => {
+  const t = parseLocalTicket('03-update-1-and-cron.md', PLAN_TICKET, '/r/.scratch/m3/03-update-1-and-cron.md', { plan: true })
+  const m: WfMap = { key: '/r/.scratch/m3', tracker: 'local', kind: 'plan', relPath: '.scratch/m3', title: 'm3', destination: '', fog: [], decisions: 0, tickets: [t] }
+  const p = sessionPrompt(m, t, undefined, DEFAULT_PLAN_PROMPT)
+  expect(p.startsWith('/wayfinder')).toBe(false)
+  expect(p).toContain('.scratch/m3/03-update-1-and-cron.md')
+  expect(p).toContain('.scratch/m3/')
+  expect(sessionPrompt(m, t, undefined, 'Do {ticket} (plan {plan})')).toBe('Do .scratch/m3/03-update-1-and-cron.md (plan .scratch/m3)')
+  expect(sessionPrompt(m, t, '/tmp/h.md', DEFAULT_PLAN_PROMPT)).toContain('read the "## 03" section of /tmp/h.md')
+  expect(planTicket(p, [m], DEFAULT_PLAN_PROMPT)).toEqual({ mapKey: m.key, id: '03' })
+  expect(planTicket(sessionPrompt(m, t, '/tmp/h.md', DEFAULT_PLAN_PROMPT), [m], DEFAULT_PLAN_PROMPT)).toEqual({ mapKey: m.key, id: '03' })
+  // Merely mentioning the file is not starting it.
+  expect(planTicket('what does .scratch/m3/03-update-1-and-cron.md need?', [m], DEFAULT_PLAN_PROMPT)).toBeUndefined()
+  expect(planTicket(p, [{ ...m, tickets: [{ ...t, closed: true }] }], DEFAULT_PLAN_PROMPT)).toBeUndefined()
+  // A wayfinder map's tickets still start with /wayfinder.
+  const w: WfMap = { ...m, kind: 'wayfinder', key: '/r/.scratch/w/map.md', relPath: '.scratch/w/map.md' }
+  expect(sessionPrompt(w, t, undefined, DEFAULT_PLAN_PROMPT)).toBe('/wayfinder .scratch/w/map.md 03')
 })

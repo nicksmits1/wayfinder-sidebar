@@ -58,28 +58,59 @@ export function readFrontmatter(text: string): { front: Front; body: string } {
 
 const str = (v: string | string[] | undefined) => (Array.isArray(v) ? v.join(', ') : v ?? '')
 
+/** Ticket files in a plain plan folder: "01-rtest-dry-run.md", "3_x.md". */
+export const isPlanFile = (name: string) => /^\d+[-_].*\.md$/i.test(name)
+
+/** Placeholders that mean "nobody" in an Assignee line or "nothing" in a Blocked by line. */
+const NOBODY = /^(none|nobody|unassigned|-|—|n\/a|\[\])$/i
+
 /**
- * One ticket file. Accepts both shapes seen in the wild:
- * - frontmatter: title / type / status / assignee / blocked_by (/ hitl)
- * - the skill doc's: "# Title", "Type: …", "Status: claimed|resolved", "Blocked by: 01, 02"
+ * A `Name: value` field anywhere in the body: on its own line (`Type: task`, `**Type:** task`,
+ * `**Type**: task`) or as one of several `·` or `|` separated fields on a line
+ * (`**When:** Thu · **Owner:** Nick · **Depends on:** 02`). The first match wins.
  */
-export function parseLocalTicket(fileName: string, text: string, path: string): Ticket {
+export function field(body: string, name: string): string | undefined {
+  const re = new RegExp(`(?:^|[·|])[ \\t]*(?:\\*\\*)?${name}(?:\\*\\*)?[ \\t]*:[ \\t]*(?:\\*\\*)?[ \\t]*([^·|\\n]+)`, 'im')
+  const v = re.exec(body)?.[1]?.trim()
+  return v || undefined
+}
+
+/** "- [x] a" and "- [ ] b": whether the body has checkboxes, and whether all are ticked. */
+function checkboxes(body: string): { any: boolean; all: boolean } {
+  const boxes = [...body.matchAll(/^\s*[-*]\s+\[([ xX])\]/gm)].map(m => m[1] !== ' ')
+  return { any: boxes.length > 0, all: boxes.length > 0 && boxes.every(Boolean) }
+}
+
+export type ParseOpts = {
+  /** The file is in a plain plan folder (no map.md): a missing type means a task, not a warning. */
+  plan?: boolean
+}
+
+/**
+ * One ticket file. Accepts the shapes seen in the wild:
+ * - frontmatter: title / type / status / assignee / blocked_by (/ hitl)
+ * - the skill doc's: "# Title", "Type: …", "Status: claimed|resolved", "Assignee: …", "Blocked by: 01, 02"
+ * - plain plans: "# Title", inline "**Depends on:** 02", and checkboxes that close the ticket when all are ticked
+ *
+ * `Owner:` is deliberately not read as a claim: plans name an owner on every ticket, taken or not.
+ */
+export function parseLocalTicket(fileName: string, text: string, path: string, o: ParseOpts = {}): Ticket {
   const { front, body } = readFrontmatter(text)
-  const line = (name: string) => {
-    const m = new RegExp(`^\\s*(?:\\*\\*)?${name}(?:\\*\\*)?\\s*:\\s*(.+)$`, 'im').exec(body)
-    return m?.[1] ? m[1].trim() : undefined
-  }
+  const line = (name: string) => field(body, name)
   const heading = /^#\s+(.+)$/m.exec(body)?.[1]?.trim()
-  const slugTitle = fileName.replace(/\.md$/, '').replace(/^\d+-/, '').replace(/-/g, ' ')
+  const slugTitle = fileName.replace(/\.md$/, '').replace(/^\d+[-_]/, '').replace(/[-_]/g, ' ')
   const title = str(front.title) || heading || slugTitle
   const typeRaw = str(front.type) || line('Type')
-  const type = normalizeType(typeRaw)
-  const statusRaw = (str(front.status) || line('Status') || 'open').toLowerCase()
-  const closed = /closed|resolved|done|complete/.test(statusRaw)
-  const assignee = str(front.assignee) || (/claimed/.test(statusRaw) ? 'claimed' : '')
-  const blockedRaw = front.blocked_by ?? front.blockedBy ?? line('Blocked by')
+  const type = !typeRaw && o.plan ? 'task' : normalizeType(typeRaw)
+  const statusExplicit = str(front.status) || line('Status')
+  const boxes = checkboxes(body)
+  const statusRaw = (statusExplicit || 'open').toLowerCase()
+  const closed = statusExplicit ? /closed|resolved|done|complete/.test(statusRaw) : boxes.all
+  const assigneeRaw = str(front.assignee) || line('Assignee') || ''
+  const assignee = (NOBODY.test(assigneeRaw) ? '' : assigneeRaw) || (/claimed/.test(statusRaw) ? 'claimed' : '')
+  const blockedRaw = front.blocked_by ?? front.blockedBy ?? line('Blocked by') ?? line('Depends on')
   const blockedBy = (Array.isArray(blockedRaw) ? blockedRaw : splitList(blockedRaw ?? ''))
-    .filter(b => !/^(none|-|\[\])$/i.test(b))
+    .filter(b => !NOBODY.test(b) && !/^none\b/i.test(b))
     .map(localId)
   const hitlFlag = str(front.hitl).toLowerCase() === 'true' || /\bHITL\b/.test(typeRaw ?? '')
   const warnings: string[] = []
