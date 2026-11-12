@@ -8,6 +8,7 @@ import {
   fit,
   fmtTokens,
   ghTicket,
+  isPlanFile,
   localId,
   newlyReady,
   nextUnblocked,
@@ -21,7 +22,7 @@ import {
   type GhIssue,
   type Status,
 } from './tracker'
-import { effectiveLauncher, handoffFile, handoffPrompt, launchArgv, mapRef, openArgv, sessionPrompt, sessionTicket, shellCommand, ticketRef, type Launcher } from './launch'
+import { DEFAULT_PLAN_PROMPT, effectiveLauncher, handoffFile, handoffPrompt, launchArgv, mapRef, openArgv, planTicket, sessionPrompt, sessionTicket, shellCommand, ticketRef, type Launcher } from './launch'
 
 const P = 'wayfinder-sidebar'
 const PANE = 'wayfinder'
@@ -31,7 +32,7 @@ const FLASH_MS = 1600
 const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 
 // Change a shape tag when that value's fields change: it declines what an earlier version stored.
-const mapsA = atom({ plugin: 'wayfinder-sidebar', key: 'maps' } as const, [] as WfMap[], { shape: 'maps-1' })
+const mapsA = atom({ plugin: 'wayfinder-sidebar', key: 'maps' } as const, [] as WfMap[], { shape: 'maps-2' })
 const activeA = atom({ plugin: 'wayfinder-sidebar', key: 'active' } as const, '')
 const selA = atom({ plugin: 'wayfinder-sidebar', key: 'sel' } as const, '')
 const flowA = atom({ plugin: 'wayfinder-sidebar', key: 'flow' } as const, null as Flow | null, { shape: 'flow-1' })
@@ -63,9 +64,9 @@ const BANNER = '#292e42'
 const RED = '#db4b4b'
 const LEVEL = { ok: GREEN, warn: YELLOW, over: RED } as const
 
-type Opts = { launcher: Launcher; editor: string; pollSeconds: number; githubSeconds: number; contextBudget: number }
+type Opts = { launcher: Launcher; editor: string; pollSeconds: number; githubSeconds: number; contextBudget: number; planPrompt: string; ignoreDirs: string[] }
 
-let opts: Opts = { launcher: 'iterm', editor: '', pollSeconds: 3, githubSeconds: 45, contextBudget: 200_000 }
+let opts: Opts = { launcher: 'iterm', editor: '', pollSeconds: 3, githubSeconds: 45, contextBudget: 200_000, planPrompt: DEFAULT_PLAN_PROMPT, ignoreDirs: [] }
 
 function readOptions(options: unknown): Opts {
   const o = (options ?? {}) as Partial<Opts>
@@ -75,6 +76,9 @@ function readOptions(options: unknown): Opts {
     pollSeconds: typeof o.pollSeconds === 'number' && o.pollSeconds > 0 ? o.pollSeconds : 3,
     githubSeconds: typeof o.githubSeconds === 'number' && o.githubSeconds >= 10 ? o.githubSeconds : 45,
     contextBudget: typeof o.contextBudget === 'number' && o.contextBudget >= 1000 ? o.contextBudget : 200_000,
+    planPrompt: typeof o.planPrompt === 'string' && o.planPrompt.includes('{ticket}') ? o.planPrompt.trim() : DEFAULT_PLAN_PROMPT,
+    ignoreDirs: (typeof o.ignoreDirs === 'string' ? (o.ignoreDirs as string).split(',') : Array.isArray(o.ignoreDirs) ? o.ignoreDirs : [])
+      .map(x => String(x).trim()).filter(Boolean),
   }
 }
 
@@ -89,42 +93,62 @@ let ghRepo: string | null | undefined // undefined: not checked yet; null: none
 let lastGh = 0
 let ghMaps: WfMap[] = []
 let busy = false
-let pendingWork: string | undefined // `/wayfinder` arguments waiting for the maps to load
+// What a prompt says this session works on, waiting for the maps to load: `/wayfinder` arguments, or a plan prompt's text.
+let pendingWork: { kind: 'wayfinder' | 'plan'; text: string } | undefined
 let tick = 0
 let focused: string | undefined // key of the pane element holding the focus ring
 const localSig = new Map<string, { sig: string; map: WfMap }>()
 
 // ---------- loading ----------
 
+/** Numbered ticket files in `dir`: name and mtime, sorted by name. */
+async function ticketFiles($: Dollar, dir: string, planOnly: boolean) {
+  const files = (await $.fs.list(dir)).filter(f => f.kind === 'file' && f.name.endsWith('.md') && (!planOnly || isPlanFile(f.name)))
+  return files.sort((x, y) => x.name.localeCompare(y.name))
+}
+
+/**
+ * Local trackers under `.scratch/`: a folder with `map.md` is a wayfinder map; a folder without one
+ * that holds at least two numbered ticket files (at its top level, or in `tickets/` or `issues/`) is
+ * a plain plan. Anything else, and folders named in `ignoreDirs`, is skipped.
+ */
 async function loadLocal($: Dollar): Promise<WfMap[]> {
   const scratch = `${root}/.scratch`
   if (!(await $.fs.exists(scratch))) return []
   const out: WfMap[] = []
   for (const dir of await $.fs.list(scratch)) {
-    if (dir.kind !== 'dir') continue
+    if (dir.kind !== 'dir' || opts.ignoreDirs.includes(dir.name)) continue
     const base = `${scratch}/${dir.name}`
     const mapPath = `${base}/map.md`
-    if (!(await $.fs.exists(mapPath))) continue
+    const isMap = await $.fs.exists(mapPath)
     let ticketDir = ''
     for (const name of ['tickets', 'issues']) if (await $.fs.exists(`${base}/${name}`)) { ticketDir = `${base}/${name}`; break }
-    const files = ticketDir ? (await $.fs.list(ticketDir)).filter(f => f.kind === 'file' && f.name.endsWith('.md')) : []
-    const mapStat = await $.fs.stat(mapPath)
-    const sig = `${mapStat.mtimeMs}|${files.map(f => `${f.name}:${f.mtimeMs}`).join(',')}`
-    const cached = localSig.get(mapPath)
+    // A map's ticket folder holds any .md; a plan, and a map with no ticket folder, only numbered files at the top level.
+    let files = ticketDir ? await ticketFiles($, ticketDir, !isMap) : []
+    if (!files.length) { ticketDir = base; files = await ticketFiles($, base, true) }
+    if (!isMap && files.length < 2) continue
+    const kind = isMap ? 'wayfinder' as const : 'plan' as const
+    const key = isMap ? mapPath : base
+    const relPath = isMap ? `.scratch/${dir.name}/map.md` : `.scratch/${dir.name}`
+    const headStat = await $.fs.stat(isMap ? mapPath : base)
+    const sig = `${headStat.mtimeMs}|${files.map(f => `${f.name}:${f.mtimeMs}`).join(',')}`
+    const cached = localSig.get(key)
     if (cached && cached.sig === sig) { out.push(cached.map); continue }
     try {
-      const header = parseMapBody(await $.fs.read(mapPath), dir.name)
+      const header = isMap
+        ? parseMapBody(await $.fs.read(mapPath), dir.name)
+        : { title: dir.name, destination: `A plain plan in ${relPath}/ (numbered tickets, no map.md).`, fog: [], decisions: 0 }
       const tickets: Ticket[] = []
-      for (const f of files.sort((a, b) => a.name.localeCompare(b.name))) {
+      for (const f of files) {
         const path = `${ticketDir}/${f.name}`
-        try { tickets.push(parseLocalTicket(f.name, await $.fs.read(path), path)) }
+        try { tickets.push(parseLocalTicket(f.name, await $.fs.read(path), path, { plan: !isMap })) }
         catch { tickets.push({ id: localId(f.name), title: f.name, type: 'unknown', hitl: false, closed: false, assignee: '', blockedBy: [], path, warning: 'could not read the file' }) }
       }
-      const map: WfMap = { key: mapPath, tracker: 'local', relPath: `.scratch/${dir.name}/map.md`, ...header, tickets }
-      localSig.set(mapPath, { sig, map })
+      const map: WfMap = { key, tracker: 'local', kind, relPath, ...header, tickets }
+      localSig.set(key, { sig, map })
       out.push(map)
     } catch (err) {
-      out.push({ key: mapPath, tracker: 'local', relPath: `.scratch/${dir.name}/map.md`, title: dir.name, destination: '', fog: [], decisions: 0, tickets: [], error: String(err) })
+      out.push({ key, tracker: 'local', kind, relPath, title: dir.name, destination: '', fog: [], decisions: 0, tickets: [], error: String(err) })
     }
   }
   return out
@@ -192,7 +216,7 @@ async function refresh($: Dollar, opt: { github?: boolean } = {}) {
     await resolveWork($)
     if (fresh.length) await update($, flashA, () => ({ ids: fresh, until: now + FLASH_MS }))
     const active = await read($, activeA)
-    const first = next[0]
+    const first = firstOpen(next)
     if (!next.some(m => m.key === active) && first) await update($, activeA, () => first.key)
     // A launch stops showing once its ticket is claimed, or after ten minutes.
     await update($, launchesA, ls => ls.filter(l => {
@@ -205,6 +229,9 @@ async function refresh($: Dollar, opt: { github?: boolean } = {}) {
     busy = false
   }
 }
+
+/** The map to show first: the first with an open ticket, so finished maps don't hide live ones. */
+const firstOpen = (maps: readonly WfMap[]) => maps.find(m => m.tickets.some(t => !t.closed)) ?? maps[0]
 
 // ---------- which tab holds which ticket ----------
 
@@ -255,14 +282,16 @@ async function heldSet($: Dollar, m: WfMap): Promise<Set<string>> {
 }
 
 /**
- * Holds the ticket a `/wayfinder <map> <ticket>` prompt names, so this session shows it as its own
- * from the first turn. Skipped when the arguments name no open ticket, or another tab holds it.
+ * Holds the ticket a `/wayfinder <map> <ticket>` prompt, or a plan prompt as ▶ sends it, names, so
+ * this session shows it as its own from the first turn. Skipped when the prompt names no open
+ * ticket, or another tab holds it.
  */
 async function resolveWork($: Dollar) {
   if (pendingWork === undefined) return
   const maps = await read($, mapsA)
   if (!maps.length) return // not loaded yet: the next refresh tries again
-  const hit = sessionTicket(pendingWork, maps)
+  const w = pendingWork
+  const hit = w.kind === 'wayfinder' ? sessionTicket(w.text, maps) : planTicket(w.text, maps, opts.planPrompt)
   pendingWork = undefined
   if (!hit) return
   const key = `${hit.mapKey}|${hit.id}`
@@ -357,7 +386,7 @@ async function closeFlow($: Dollar) {
   if (sel) focusKey($, `sel:${sel}`)
 }
 
-/** Works the ticket in this session by running `/wayfinder <map> <ticket>` here. */
+/** Works the ticket in this session: runs `/wayfinder <map> <ticket>` here, or sends a plan ticket's prompt. */
 async function launchHere($: Dollar) {
   const flow = await read($, flowA)
   const m = await activeMap($)
@@ -365,9 +394,16 @@ async function launchHere($: Dollar) {
   if (!m || !t) return
   await update($, pickedA, () => [])
   await closeFlow($)
+  if (m.kind === 'plan') {
+    const text = sessionPrompt(m, t, undefined, opts.planPrompt)
+    pendingWork = { kind: 'plan', text }
+    await resolveWork($)
+    void $.prompt.submit({ text })
+    return
+  }
   // A mod may not submit a "/..." prompt; it runs the command instead, which skips the prompt.submit hook.
   const args = `${mapRef(m)} ${ticketRef(t)}`
-  pendingWork = args
+  pendingWork = { kind: 'wayfinder', text: args }
   await resolveWork($)
   try {
     await $.command.run({ command: 'wayfinder', args })
@@ -397,7 +433,7 @@ async function launchAll($: Dollar, withHandoff: boolean) {
   const path = withHandoff ? flow.handoffPath : undefined
   const cmds = flow.ids.map(id => {
     const t = m.tickets.find(x => x.id === id)!
-    return shellCommand(root, sessionPrompt(m, t, path))
+    return shellCommand(root, sessionPrompt(m, t, path, opts.planPrompt))
   })
   let ok = 0
   const launcher = effectiveLauncher(opts.launcher, platform)
@@ -546,7 +582,7 @@ async function afterToolCall($: Dollar, path: string, cmd: string) {
 async function startup($: Dollar) {
   await refresh($, { github: true })
   const maps = await read($, mapsA)
-  const first = maps.find(m => m.tracker === 'local') ?? maps[0]
+  const first = firstOpen(maps.filter(m => m.tracker === 'local')) ?? maps[0]
   if (first) void $.ui.open({ id: PANE, title: first.title })
 }
 
@@ -583,17 +619,18 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'wayfinder-map' }, async $ => {
     await refresh($, { github: true })
     const maps = await read($, mapsA)
-    if (!maps.length) return { text: 'No wayfinder map found: looked for .scratch/<effort>/map.md and open GitHub issues labelled wayfinder:map.' }
+    if (!maps.length) return { text: 'No map or plan found: looked for .scratch/<effort>/map.md, .scratch/<plan>/ folders with numbered ticket files, and open GitHub issues labelled wayfinder:map.' }
     const r = await $.ui.open({ id: PANE, title: (await activeMap($))?.title ?? 'Wayfinder' })
     return { text: r.isPlaced ? `Wayfinder sidebar open (${maps.length} map${maps.length > 1 ? 's' : ''}).` : `Wayfinder sidebar is waiting for room: ${r.reason}` }
   })
 
-  // A session started with `/wayfinder <map> <ticket>` (as ▶ starts them) works on that ticket.
+  // A session started with `/wayfinder <map> <ticket>`, or with a plan ticket's prompt (as ▶ starts them), works on that ticket.
   on('prompt.submit', async ($, e, next) => {
     const args = e.command
       ? (e.command.name === 'wayfinder' ? e.command.args : undefined)
       : /^\/wayfinder\s/.test(e.text) ? e.text.replace(/^\/wayfinder\s+/, '') : undefined
-    if (args !== undefined) { pendingWork = args; void resolveWork($) }
+    if (args !== undefined) { pendingWork = { kind: 'wayfinder', text: args }; void resolveWork($) }
+    else if (!e.command && e.text) { pendingWork = { kind: 'plan', text: e.text }; void resolveWork($) }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -654,8 +691,8 @@ export const register: Register = (on, options) => {
     if (!m) {
       return (
         <Box flexDirection="column">
-          <Text color={TEXT}>No wayfinder map here yet.</Text>
-          <Text dimColor>Looked for .scratch/&lt;effort&gt;/map.md and open GitHub issues labelled wayfinder:map. Run /wayfinder to chart one.</Text>
+          <Text color={TEXT}>No wayfinder map or plan here yet.</Text>
+          <Text dimColor>Looked for .scratch/&lt;effort&gt;/map.md, .scratch/&lt;plan&gt;/ folders with two or more numbered ticket files (01-x.md), and open GitHub issues labelled wayfinder:map. Run /wayfinder to chart one.</Text>
         </Box>
       )
     }

@@ -65,7 +65,7 @@ Answer `y` to add the marketplace, then pick a scope. From a shell:
 claude plugin install wayfinder-sidebar --marketplace nicksmits1/wayfinder-sidebar
 ```
 
-The sidebar opens on its own when the working directory has a map, and `/wayfinder-map` opens it any time. It docks beside the chat in fullscreen mode when the terminal is at least 110 columns wide.
+The sidebar opens on its own when the working directory has a map or plan, and `/wayfinder-map` opens it any time. It docks beside the chat in fullscreen mode when the terminal is at least 110 columns wide.
 
 ### Requirements
 
@@ -120,12 +120,38 @@ claude "/wayfinder <map> <ticket>  Context from the session that launched this o
 
 ## Trackers
 
-- **Local markdown:** `.scratch/<effort>/map.md`, with tickets in `tickets/` or `issues/`. Two ticket formats work: YAML frontmatter (`title`, `type`, `status`, `assignee`, `blocked_by`), or the skill doc's plain lines (`# Title`, `Type:`, `Status:`, `Blocked by:`).
+- **Local markdown:** `.scratch/<effort>/map.md`, with tickets in `tickets/` or `issues/` (or numbered files next to `map.md`). Two ticket formats work: YAML frontmatter (`title`, `type`, `status`, `assignee`, `blocked_by`), or the skill doc's plain lines (`# Title`, `Type:`, `Status:`, `Assignee:`, `Blocked by:`). An `Assignee:` of `none`, `-` or `unassigned` means unclaimed.
+- **Plain plans:** a `.scratch/<plan>/` folder with no `map.md` but two or more numbered ticket files (`01-dry-run.md`, `02-merge.md`), at its top level or in `tickets/` or `issues/`. See [Plain plans](#plain-plans).
 - **GitHub:** open issues labelled `wayfinder:map` in the working directory's repository, read with `gh`. Tickets are the map's sub-issues (or a task list in its body), typed by `wayfinder:<type>` labels, and blocked by GitHub's native issue dependencies (or a `Blocked by: #n` line).
+
+Fields can sit on their own line (`Type: task`, `**Type:** task`) or several to a line, separated by `·` or `|` (`**When:** Thu · **Owner:** Nick · **Depends on:** 02`). `Depends on:` is read as `Blocked by:`. A ticket with no `Status:` line is closed once every `- [ ]` checkbox in it is ticked.
 
 Task tickets count as AFK unless the file has `hitl: true` or the issue has a `wayfinder:hitl` label.
 
 Every Claude Code tab runs its own copy of the mod against the same tracker. A tab's own edits show at once. Other tabs' edits show within a few seconds, because the mod checks file modification times. GitHub maps refresh every 45 seconds.
+
+## Plain plans
+
+Not every plan is a wayfinder map. A folder of numbered checklists, such as one written in a grilling session, shows up as a **plan** tab beside your maps:
+
+```markdown
+# Update #1 on prod + install cron
+
+**When:** Thu 11-12 · **Owner:** Nick · **Depends on:** 02
+
+- [ ] Run --mode evaluate
+- [ ] Run --mode deploy
+```
+
+- The title is the `#` heading. Tickets without a `Type:` are tasks.
+- `Depends on:` (or `Blocked by:`) sets the blockers. All boxes ticked, or `Status: closed`, closes the ticket.
+- `Owner:` is not a claim, because plans name an owner on every ticket. Add `Assignee: <name>` to claim one in the file.
+- `▶` starts the ticket with the `planPrompt` setting instead of `/wayfinder`: by default, *"Work on the ticket .scratch/m3/03-update-1-and-cron.md from the plan in .scratch/m3/. Read the other tickets in that folder for context, then do this one and tick its checklist as you go."* Handoffs, **this tab** and multi-start work as they do for maps.
+- A session started with that prompt holds its ticket, and every other tab shows it as claimed, just like a `/wayfinder` session.
+
+To hide a folder that looks like a plan but isn't, add its name to `ignoreDirs`.
+
+The sidebar opens on the first map or plan that still has open tickets.
 
 ## Settings
 
@@ -138,6 +164,8 @@ Change these in `/plugin` → wayfinder-sidebar → configure, or under `pluginC
 | `pollSeconds` | `3` | How often local files are checked |
 | `githubSeconds` | `45` | How often GitHub maps are re-read |
 | `contextBudget` | `200000` | Tokens per session where the context bar fills and turns red |
+| `planPrompt` | see [Plain plans](#plain-plans) | What `▶` asks a new session to do on a plain plan's ticket. `{ticket}` is the ticket file, `{plan}` its folder. |
+| `ignoreDirs` | empty | Comma-separated `.scratch` folder names never shown as maps or plans |
 
 The first launch into iTerm or Terminal makes macOS ask whether Claude Code may control that app.
 
