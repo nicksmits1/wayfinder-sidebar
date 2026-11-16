@@ -5,6 +5,22 @@ import { appleQuote, shellQuote } from './tracker'
 export const mapRef = (m: WfMap) => (m.tracker === 'local' ? m.relPath ?? m.key : m.url ?? m.key)
 export const ticketRef = (t: Ticket) => t.id
 
+/** What ▶ asks a new session to do on a plain plan's ticket. `{ticket}` and `{plan}` are paths relative to the root. */
+export const DEFAULT_PLAN_PROMPT =
+  'Work on the ticket {ticket} from the plan in {plan}/. Read the other tickets in that folder for context, then do this one and tick its checklist as you go.'
+
+/** A plan ticket's file relative to the session root: the plan's relPath plus the file's place under the plan folder. */
+export function ticketPath(m: WfMap, t: Ticket): string {
+  const base = m.relPath ?? m.key
+  if (!t.path) return `${base}/${t.id}`
+  return t.path.startsWith(`${m.key}/`) ? `${base}/${t.path.slice(m.key.length + 1)}` : t.path
+}
+
+function planBase(m: WfMap, t: Ticket, template: string): string {
+  const plan = m.relPath ?? m.key
+  return template.split('{ticket}').join(ticketPath(m, t)).split('{plan}').join(plan)
+}
+
 /** The skill body without its frontmatter, minus the line about where to save (the mod picks the path). */
 export function handoffRules(skillText: string | undefined): string {
   if (!skillText) {
@@ -44,10 +60,27 @@ export function handoffPrompt(m: WfMap, tickets: readonly Ticket[], path: string
   ].join('\n')
 }
 
-export function sessionPrompt(m: WfMap, t: Ticket, handoffPath: string | undefined): string {
-  const base = `/wayfinder ${mapRef(m)} ${ticketRef(t)}`
+export function sessionPrompt(m: WfMap, t: Ticket, handoffPath: string | undefined, planPrompt: string = DEFAULT_PLAN_PROMPT): string {
+  const base = m.kind === 'plan' ? planBase(m, t, planPrompt) : `/wayfinder ${mapRef(m)} ${ticketRef(t)}`
   if (!handoffPath) return base
   return `${base}  Context from the session that launched this one: read the "## ${t.id}" section of ${handoffPath} before anything else.`
+}
+
+/**
+ * The plan ticket a prompt starts work on: only a prompt that begins with exactly what ▶ sends for
+ * an open plan ticket counts, so mentioning a ticket's file in passing claims nothing.
+ */
+export function planTicket(text: string, maps: readonly WfMap[], planPrompt: string = DEFAULT_PLAN_PROMPT): { mapKey: string; id: string } | undefined {
+  const s = text.trim()
+  for (const m of maps) {
+    if (m.kind !== 'plan') continue
+    for (const t of m.tickets) {
+      if (t.closed) continue
+      const base = planBase(m, t, planPrompt)
+      if (s === base || s.startsWith(`${base} `)) return { mapKey: m.key, id: t.id }
+    }
+  }
+  return undefined
 }
 
 /**

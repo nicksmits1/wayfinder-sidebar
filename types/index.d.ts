@@ -20,15 +20,21 @@ export type Ticket = {
 }
 
 export type WfMap = {
-  /** Absolute map.md path, or "github:<owner>/<repo>#<n>". */
+  /** Absolute map.md path, a plain plan's absolute folder path, or "github:<owner>/<repo>#<n>". */
   key: string
   tracker: 'local' | 'github'
+  /**
+   * wayfinder: a map.md (or GitHub map); its tickets start with `/wayfinder <map> <ticket>`.
+   * plan: a folder of numbered ticket files with no map.md; its tickets start with the plan prompt.
+   * Absent means wayfinder.
+   */
+  kind?: 'wayfinder' | 'plan'
   title: string
   destination: string
   fog: string[]
   decisions: number
   tickets: Ticket[]
-  /** Local: map.md path relative to the session root. */
+  /** Local: map.md path (or a plan's folder) relative to the session root. */
   relPath?: string
   /** GitHub: the map issue's URL. */
   url?: string
