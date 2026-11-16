@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import type { On } from 'claude-code'
 
 // A fake repo with one local map, served through the fs hooks (tests have no real file system).
 const ROOT = '/repo'
@@ -119,7 +120,7 @@ test('draws ready, claimed and blocked tickets, and asks before starting one', a
 })
 
 // The fake repo's world for one tab: session `sid`, sharing `shared` with the other tabs.
-function tab(on: Parameters<Parameters<typeof test>[1]>[1], sid: string, shared: Record<string, unknown>) {
+function tab(on: On, sid: string, shared: Record<string, unknown>) {
   on('session.root', () => ({ value: ROOT }))
   on('session.id', () => ({ value: sid }))
   on('env.get', (_, e) => ({ value: e.name === 'TMPDIR' ? '/tmp' : '/home' }))
@@ -134,7 +135,7 @@ function tab(on: Parameters<Parameters<typeof test>[1]>[1], sid: string, shared:
   }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 10, mtimeMs: 1, isLink: false } }))
   on('fs.read', (_, e) => (e.path in FILES ? { value: FILES[e.path]! } : { deny: 'missing' }))
-  const argvs: string[][] = []
+  const argvs: (readonly string[])[] = []
   on('process.run', (_, e) => {
     if (e.argv[0] === 'uname') return { value: { exitCode: 0, stdout: 'Darwin\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     argvs.push(e.argv)
@@ -146,7 +147,7 @@ function tab(on: Parameters<Parameters<typeof test>[1]>[1], sid: string, shared:
   on('prompt.submit', (_, e) => { prompts.push(e.text); return { text: e.text } })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   const toasts: string[] = []
-  on('ui.toast', (_, e) => { toasts.push(JSON.stringify(e)); return { value: {} } })
+  on('ui.toast', (_, e) => { toasts.push(JSON.stringify(e)); return { value: undefined } })
 
   return { clock, toasts, argvs, prompts }
 }
@@ -155,7 +156,7 @@ test('a session started with /wayfinder <map> <ticket> holds that ticket from it
   const { clock, toasts } = tab(on, 'sess-new', {})
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   // The launch prompt can arrive before the maps have loaded.
-  await $.prompt.submit({ text: '/wayfinder .scratch/wayfinder/map.md 07' })
+  await $.prompt.submit({ text: '/wayfinder .scratch/wayfinder/map.md 07', wait: false, origin: { kind: 'composer' } })
   await clock.advance(10)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -242,7 +243,7 @@ test('"this tab" on a plan ticket sends the plan prompt here and holds the ticke
 test('a session started with the plan prompt holds that plan ticket from its first turn', async ($, on) => {
   const { clock, toasts } = tab(on, 'sess-new', {})
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
-  await $.prompt.submit({ text: `${PLAN_PROMPT_01} Read the other tickets in that folder for context, then do this one and tick its checklist as you go.` })
+  await $.prompt.submit({ text: `${PLAN_PROMPT_01} Read the other tickets in that folder for context, then do this one and tick its checklist as you go.`, wait: false, origin: { kind: 'composer' } })
   await clock.advance(10)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: `map:${PLAN_KEY}` })
