@@ -164,6 +164,53 @@ export function taskListNumbers(body: string): number[] {
   return [...body.matchAll(/^\s*[-*]\s+\[[ xX]\]\s+.*?#(\d+)/gm)].map(m => Number(m[1]))
 }
 
+// GitHub is read over GraphQL: a map's children and their blockers arrive in one request. The REST
+// sub-issue and dependency endpoints take a request per ticket and have a small rate limit of their own.
+
+/** An issue as the queries below return it. */
+export type GqlIssue = {
+  number: number
+  title: string
+  state: string
+  url?: string
+  body?: string | null
+  labels?: { nodes?: ({ name?: string } | null)[] | null } | null
+  assignees?: { nodes?: ({ login: string } | null)[] | null } | null
+  blockedBy?: { nodes?: ({ number: number } | null)[] | null } | null
+}
+
+const issueFields = (deps: boolean) =>
+  `number title state url body labels(first:30){nodes{name}} assignees(first:5){nodes{login}}${deps ? ' blockedBy(first:50){nodes{number}}' : ''}`
+
+/** A map issue's sub-issues, 100 a page. Variables: owner, name, number, after. */
+export const SUB_ISSUES_QUERY =
+  `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){issue(number:$number){subIssues(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{${issueFields(true)}}}}}}`
+
+/** The issues with these numbers (a map's task list). `deps` leaves out native blockers for a GitHub without them. Variables: owner, name. */
+export const issuesQuery = (numbers: readonly number[], deps: boolean) =>
+  `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${numbers.map(n => `i${n}:issue(number:${n}){${issueFields(deps)}}`).join(' ')}}}`
+
+const nodes = <T>(c: { nodes?: (T | null)[] | null } | null | undefined): T[] => (c?.nodes ?? []).filter((x): x is T => x != null)
+
+export function subIssuesPage(data: unknown): { issues: GqlIssue[]; next?: string } {
+  const issue = (data as { repository?: { issue?: { subIssues?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: (GqlIssue | null)[] } | null } | null } | null } | null)?.repository?.issue
+  if (!issue) throw new Error('the map issue was not found')
+  const page = issue.subIssues?.pageInfo
+  return { issues: nodes(issue.subIssues), next: page?.hasNextPage && page.endCursor ? page.endCursor : undefined }
+}
+
+/** What `issuesQuery` found, in the order asked for; a number that names no issue (a pull request, say) is left out. */
+export function issuesByNumber(data: unknown, numbers: readonly number[]): GqlIssue[] {
+  const repo = (data as { repository?: Record<string, GqlIssue | null> | null } | null)?.repository ?? {}
+  return numbers.map(n => repo[`i${n}`]).filter((x): x is GqlIssue => x != null)
+}
+
+/** A ticket from a GraphQL issue. With no native blockers, a "Blocked by: #n" body line counts. */
+export function gqlTicket(i: GqlIssue): Ticket {
+  const native = nodes(i.blockedBy).map(b => b.number)
+  return ghTicket({ ...i, labels: nodes(i.labels), assignees: nodes(i.assignees) }, native.length ? native : undefined)
+}
+
 // ---------- status ----------
 
 export type Status = 'closed' | 'claimed' | 'launching' | 'blocked' | 'ready'

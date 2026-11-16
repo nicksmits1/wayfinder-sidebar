@@ -18,6 +18,12 @@ All notable changes to this project are documented here. The format follows [Kee
 - New banner bar at the top of the pane: ◈ WAYFINDER on the left, ready / claimed / blocked / done counts on the right.
 - The map destination wraps to two lines instead of being cut at one, and markdown such as `**bold**` is shown as plain text.
 - A selected ticket's details name the ticket it unblocks next (preferring one that becomes ready), with a count of the rest, instead of a bare count.
+- GitHub maps are read over GraphQL: a map's sub-issues and their blockers arrive in one request, instead of one REST request for the map and one more per open ticket.
+- The tabs open on one repository share each read of GitHub, so it is asked once per `githubSeconds` however many tabs are open, and a tab shows another tab's read within seconds.
+- A ticket with no native blockers is blocked by its `Blocked by: #n` body line, and a map with no sub-issues reads the task list in its body. Before, both applied only when the REST request failed.
+
+### Fixed
+- A GitHub map showed no tickets, and no error, once the REST sub-issue and dependency endpoints were rate-limited. GitHub counts those endpoints apart from the limit `gh api rate_limit` reports, and a few open tabs used it up. A read that fails now keeps the tickets, shows the error under the map's title, and doubles the wait before the next try (up to 15 minutes).
 
 ## [0.1.0]
 

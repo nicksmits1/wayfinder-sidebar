@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { budgetBar, budgetLevel, fmtTokens, localId, newlyReady, nextUnblocked, plainText, wrapLines, parseLocalTicket, parseMapBody, statusOf } from './tracker'
+import { budgetBar, budgetLevel, fmtTokens, gqlTicket, issuesByNumber, issuesQuery, localId, newlyReady, nextUnblocked, plainText, subIssuesPage, wrapLines, parseLocalTicket, parseMapBody, statusOf } from './tracker'
 import { effectiveLauncher, handoffFile, handoffRules, launchArgv, openArgv, sessionPrompt, sessionTicket, shellCommand } from './launch'
 import type { WfMap } from '../types'
 
@@ -152,4 +152,26 @@ test('a /wayfinder prompt names the ticket its session works on, and nothing els
   expect(sessionTicket('.scratch/w/map.md 99', [m])).toBeUndefined() // no such ticket
   expect(sessionTicket('.scratch/other/map.md 07', [m])).toBeUndefined() // another map
   expect(sessionTicket('what does 07 need?', [m])).toBeUndefined()
+})
+
+test('GitHub issues from GraphQL: type, claim, native blockers, and the body line without them', async () => {
+  const node = { number: 13, title: 'Rough playable', state: 'OPEN', url: 'https://github.com/o/r/issues/13', body: 'Blocked by: #8\n', labels: { nodes: [{ name: 'wayfinder:prototype' }] }, assignees: { nodes: [{ login: 'sam' }] }, blockedBy: { nodes: [{ number: 19 }, null, { number: 10 }] } }
+  const t = gqlTicket(node)
+  expect(t.id).toBe('#13')
+  expect(t.type).toBe('prototype')
+  expect(t.hitl).toBe(true)
+  expect(t.assignee).toBe('sam')
+  expect(t.blockedBy).toEqual(['#19', '#10'])
+  expect(t.url).toBe('https://github.com/o/r/issues/13')
+  expect(gqlTicket({ ...node, blockedBy: { nodes: [] } }).blockedBy).toEqual(['#8'])
+  expect(gqlTicket({ ...node, blockedBy: undefined, state: 'CLOSED' }).closed).toBe(true)
+
+  const page = subIssuesPage({ repository: { issue: { subIssues: { pageInfo: { hasNextPage: true, endCursor: 'MjA' }, nodes: [node, null] } } } })
+  expect(page.issues.length).toBe(1)
+  expect(page.next).toBe('MjA')
+  expect(() => subIssuesPage({ repository: { issue: null } })).toThrow()
+
+  expect(issuesQuery([3, 12], true)).toContain('i12:issue(number:12){')
+  expect(issuesQuery([3], false).includes('blockedBy')).toBe(false)
+  expect(issuesByNumber({ repository: { i12: node, i3: null } }, [3, 12]).map(i => i.number)).toEqual([13])
 })
